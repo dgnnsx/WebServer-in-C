@@ -1,15 +1,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
+#include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include <netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 
 #define PORT 3000
-#define MAXBUF 2048
+#define MAXBUF 4096
 #define GREEN	"\x1B[32m"
 #define CYAN	"\x1B[36m"
 #define YELLOW	"\x1B[33m"
@@ -19,28 +21,111 @@
 #define FORBIDDEN 403
 #define NOT_FOUND 404
 
-void header(int handler, int status) {
+#define PROTOCOL "HTTP/1.0"
+#define SERVER "Webserver in C"
+#define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
+
+void header(int handler, int status, const char * title, const char * mimeType, int length) {
     char header[MAXBUF] = {0};
-    if (status == OK) {
-        sprintf(header, "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/html; charset=UTF-8\r\n");
-    } else if (status == FORBIDDEN) {
-        sprintf(header, "HTTP/1.1 403 Forbidden\r\n\r\n");
-    } else {
-        sprintf(header, "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Type: text/html; charset=UTF-8\r\n");
+    char timebuf[128] = {0};
+    char aux[128] = {0};
+    time_t now;
+
+    sprintf(aux, "%s %d %s\r\n", PROTOCOL, status, title);
+    strcat(header, aux);
+
+    memset(aux, '\0', sizeof(aux));
+    sprintf(aux, "Server: %s\r\n", SERVER);
+    strcat(header, aux);
+
+    now = time(NULL);
+    strftime(timebuf, sizeof(timebuf), RFC1123FMT, gmtime(&now));
+    memset(aux, '\0', sizeof(aux));
+    sprintf(aux, "Date: %s\r\n", timebuf);
+    strcat(header, aux);
+
+    if (mimeType) {
+        memset(aux, '\0', sizeof(aux));
+        sprintf(aux, "Content-Type: %s\r\n", mimeType);
+        strcat(header, aux);
     }
+    if (length >= 0) {
+        memset(aux, '\0', sizeof(aux));
+        sprintf(aux, "Content-Length: %d\r\n", length);
+        strcat(header, aux);
+    }
+    strcat(header, "Connection: close\r\n\r\n");
+    fprintf(stderr, CYAN "\n\n%s\n\n" RESET, header);
     send(handler, header, strlen(header), 0);
+}
+
+void sendNotImplemented(int handler) {
+    header(handler, 501, "Not Implemented", "text/html", -1);
+    FILE * file = fopen("./pages/501.html", "r");
+    char buffer[MAXBUF];
+    while (fgets(buffer, MAXBUF, file)) {
+        send(handler, buffer, strlen(buffer), 0);
+        memset(buffer, 0, MAXBUF);
+    }
+}
+
+void sendNotFound(int handler) {
+    header(handler, 404, "Not Found", "text/html", -1);
+    FILE * file = fopen("./pages/404.html", "r");
+    char buffer[MAXBUF];
+    while (fgets(buffer, MAXBUF, file)) {
+        send(handler, buffer, strlen(buffer), 0);
+        memset(buffer, 0, MAXBUF);
+    }
+}
+
+void sendPage(int handler, const char * path) {
+    header(handler, 200, "OK", "text/html", -1);
+    FILE * file = fopen(path, "r");
+    char buffer[MAXBUF];
+    while (fgets(buffer, MAXBUF, file)) {
+        send(handler, buffer, strlen(buffer), 0);
+        memset(buffer, 0, MAXBUF);
+    }
 }
 
 void resolve(int handler) {
     char buffer[MAXBUF];
-    char * method, * filename;
+    char * method;
+    char * path;
+    char * protocol;
+    struct stat statbuf;
 
     // The recv(), recvfrom(), and recvmsg() calls are used to receive messages from a socket
     // The recv() call is normally used only on a connected socket
     recv(handler, buffer, MAXBUF, 0);
     fprintf(stderr, "%s\n", buffer);
+
     method = strtok(buffer, " ");
+    path = strtok(NULL, " ");
+    protocol = strtok(NULL, "\r");
+
+    if (!method || !path || !protocol) return;
+
     // Only accept GET requests
+    if (strcasecmp(method, "GET") != 0) {
+        sendNotImplemented(handler);
+        return;
+    }
+
+    if (path[0] == '/') path++;
+    if (path[0] == '\0') {
+        sendPage(handler, "./pages/index.html");
+        return;
+    } else if (stat(path, &statbuf) < 0) {
+        sendNotFound(handler);
+        fprintf(stderr, "\n\nnot found\n\n");
+        return;
+    }
+
+/*
+
+
     if (strcmp(method, "GET") != 0) return;
 
     //  To signal strtok() that you want to keep searching the same string, you pass a NULL pointer as its first argument.
@@ -82,7 +167,7 @@ void resolve(int handler) {
     while (fgets(buffer, MAXBUF, file)) {
         send(handler, buffer, strlen(buffer), 0);
         memset(buffer, 0, MAXBUF);
-    }
+    }*/
 }
 
 int main(int argc, char **argv) {
@@ -98,8 +183,8 @@ int main(int argc, char **argv) {
 	/*---Initialize address/port structure---*/
 	bzero(&address, sizeof(address));
     address.sin_family = AF_INET;
+    address.sin_addr.s_addr = INADDR_ANY;
     address.sin_port = htons(PORT);
-	address.sin_addr.s_addr = INADDR_ANY;
 
     /*---Assign a port number to the socket---*/
     if (bind(server, (struct sockaddr *) &address, sizeof(address)) < 0) {
@@ -112,13 +197,14 @@ int main(int argc, char **argv) {
         perror("listen");
         exit(EXIT_FAILURE);
     }
+    printf("\n\nHTTP server listening on port %d\n\n", PORT);
 
-    // accept incoming requests asynchronously
-    int handler;
-    socklen_t size;
-    struct sockaddr_storage client;
 	// Loop infinitly serving requests
 	while(1) {
+        int handler;
+        socklen_t size;
+        struct sockaddr_storage client;
+
         size = sizeof(client);
 
         handler = accept(server, (struct sockaddr *) &client, &size);

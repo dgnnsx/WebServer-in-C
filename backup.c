@@ -1,462 +1,482 @@
-#include <sys/socket.h>       // socket definitions
-#include <sys/types.h>        // socket types
-#include <arpa/inet.h>        // inet (3) funtions
-#include <unistd.h>           // misc. UNIX functions
-#include <signal.h>           // signal handling
-#include <stdlib.h>           // standard library
-#include <stdio.h>            // input/output library
-#include <string.h>           // string library
-#include <errno.h>            // error number library
-#include <fcntl.h>            // for O_* constants
-#include <sys/mman.h>         // mmap library
-#include <sys/types.h>        // various type definitions
-#include <sys/stat.h>         // more constants
+/*
+ * Projeto servidor http
+ *
+ */
+/*** Bibliotecas necessÃ¡rias */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <time.h>
+#include <sys/stat.h>   /* Biblioteca para se utilizar a struct stat para verificaÃ§Ã£o de arquivos*/
+#include <fcntl.h>      /* Biblioteca para se utilizar a funÃ§Ã£o open()*/
+#include <sys/socket.h> /* Biblioteca contendo as definicoes de sockets*/
+#include <sys/wait.h>   /* Biblioteca para utillizar a funÃ§Ã£o waitpid() */
+#include <sys/types.h>  /* Biblioteca contendo os tipos de socket */
+#include <arpa/inet.h>  /* Biblioteca contendo Funcoes referentes ao inet (Rede) */
+#include <unistd.h>     /* Biblioteca contendo varios comandos *NIX */
+#include <pthread.h>    /* Biblioteca para utilizacao de THREADS para otimizar o acesso*/
 
-// global constants
-#define PORT 3000             // port to connect on
-#define LISTENQ 10            // number of connections
-#define GREEN	"\x1B[32m"
-#define CYAN	"\x1B[36m"
-#define YELLOW	"\x1B[33m"
-#define RESET	"\x1B[0m"
+/**
+ * Parametros utilizados pelo programa
+ */
+#define SERVERNAME  "Audemar & Fernando WebServer"    /* Nome do sistema */
+#define PORTA       (7777)                /* Porta utilizada pelo server */
+#define PROTOCOLO   "HTTP/1.1"                /* Protocolo HTTP (VersÃ£o) */
+#define PEND        (1024)                /* Tamanho maximo da fila de conexoes pendentes */
+#define MAXBUF      (4096)                /* Tamanho de buffer */
+#define RFC1123     "%a, %d %b %Y %H:%M:%S GMT"        /* Formato de hora para cabecalho*/
+#define MAX_THREAD  5                    /* Tamanho maximo de threads*/
+#define DIR_ROOT    "/home/"            /* Diretorio onde ficam as paginas */
 
-int list_s;                   // listening socket
+/************************ Estruturas **********************/
+typedef enum{
+    false,
+    true
+}Boolean;
+/**
+ * Estrutura utilizada para guardar dados pertinentes a um host
+ */
+typedef struct{
+    int socket;
+    struct sockaddr_in destino;
+}Host;
 
-// structure to hold the return code and the filepath to serve to client.
-typedef struct {
-	int returncode;
-	char *filename;
-} httpRequest;
+/**
+ * Estrutura utilizada para organizar a requesicao de um client, fazendo a divisao do path "diretorio" + protocolo versao
+ */
+typedef struct{
+    char line[MAXBUF];
+    char metodo[4];        //Nesse codigo so esta implementado o metodo GET
+    char recurso[1000];         //Recurso requisitado pelo cliente . Ex: index.html ; random/image.gif...
+    char protocolo[20];         //Versao do Protocolo http
+}Request;
 
-// Structure to hold variables that will be placed in shared memory
-typedef struct {
-	pthread_mutex_t mutexlock;
-	int totalbytes;
-} sharedVariables;
+/**
+ * Estrutura utilizada para guardar os returns da funcao checkRequest
+ */
+typedef struct{
+    char dir[MAXBUF];        // diretorio local do arquivo
+    struct stat statBuffer;    // Montar a estrutura para verificaÃ§Ã£o de estado dos arquivos
+    int n;            // Abrir o arquivo local como "inteiro"
+    int answerCOD;            // Resposta do servidor HTTP. Ex: 200, 404 ...
+}CR_returns;
 
-// headers to send to clients
-char *header200 = "HTTP/1.0 200 OK\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
-char *header400 = "HTTP/1.0 400 Bad Request\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
-char *header404 = "HTTP/1.0 404 Not Found\nServer: CS241Serv v0.1\nContent-Type: text/html\n\n";
+/**
+ * Estrutura utilizada para guardar os dados do server e do cliente corrente
+ */
+typedef struct{
+    Host server;
+    Host client;
+}Hosts;
+/********************* Fim das estruturas *******************/
 
-// get a message from the socket until a blank line is recieved
-char *getMessage(int fd) {
 
-    // A file stream
-    FILE *sstream;
 
-    // Try to open the socket to the file stream and handle any failures
-    if( (sstream = fdopen(fd, "r")) == NULL)
-    {
-        fprintf(stderr, "Error opening file descriptor in getMessage()\n");
-        exit(EXIT_FAILURE);
+/********************* Funcoes de socket *******************/
+int setSocket(int *sockete){
+    *sockete = socket(AF_INET, SOCK_STREAM, 0);
+
+    if ( &sockete < 0 )
+        return 1;
+
+    return 0;
+}
+
+int setBind(Host *name){
+    Host aux = *name;
+
+    if ( bind(aux.socket, (struct sockaddr*)&aux.destino, sizeof(aux.destino)) != 0 )
+        return 1;
+
+    *name = aux;
+    return 0;
+}
+
+int setListen(Host name){
+    if ( listen(name.socket, PEND) != 0 )
+        return 1;
+
+    return 0;
+}
+
+int setServer(Host *name, int port){
+    Host aux;
+
+    if (setSocket(&aux.socket) == 1)
+        return 1;
+
+    //setDestino_server(&aux, port);
+    memset(&aux.destino, 0, sizeof(aux.destino));
+    aux.destino.sin_family = AF_INET;
+    aux.destino.sin_addr.s_addr = htonl(INADDR_ANY);
+    aux.destino.sin_port = htons(port);
+
+    if (setBind(&aux) == 1)
+        return 3;
+
+    if (setListen(aux) == 1)
+        return 4;
+
+    *name = aux;
+
+    return 0;
+}
+
+
+Boolean initAccept(Host *server, Host *client){
+
+    Host serverAux = *server;
+    Host clientAux = *client;
+
+    int addrlen = sizeof(clientAux.destino);
+    memset(&clientAux.destino, 0, sizeof(clientAux.destino));
+
+
+    /* Aguardar conexoes*/
+    clientAux.socket  = accept(serverAux.socket,(struct sockaddr *)&clientAux.destino, &addrlen);
+    if(clientAux.socket < 0)
+        return false;
+
+    printf(" [CONNECTION ACCEPTED] \n\n");
+    printf (" Cliente [%s] conectado na porta [%d] do servidor \n\n", inet_ntoa(clientAux.destino.sin_addr), ntohs(clientAux.destino.sin_port));
+
+    *server = serverAux;
+    *client = clientAux;
+
+    return true;
+}
+/****************** Fim das funcoes de socket ***************/
+
+/*********************** FunÃ§Ãµes Variadas do Servidor Http**/
+
+/**
+ * FunÃ§Ã£o que retorna o tipo de content-type, http://www.jbox.dk/sanos/webserver.htm
+ */
+char *get_mime_type(char *name){
+    char *ext = strrchr(name, '.');
+    if (!ext) return NULL;
+    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) return "text/html";
+    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(ext, ".gif") == 0) return "image/gif";
+    if (strcmp(ext, ".png") == 0) return "image/png";
+    if (strcmp(ext, ".css") == 0) return "text/css";
+    if (strcmp(ext, ".au") == 0) return "audio/basic";
+    if (strcmp(ext, ".wav") == 0) return "audio/wav";
+    if (strcmp(ext, ".avi") == 0) return "video/x-msvideo";
+    if (strcmp(ext, ".mpeg") == 0 || strcmp(ext, ".mpg") == 0) return "video/mpeg";
+    if (strcmp(ext, ".mp3") == 0) return "audio/mpeg";
+    return NULL;
+}
+
+/**
+ * FunÃ§Ã£o para fazer um cabeÃ§alho padrÃ£o HTTP
+ */
+void httpHeader(int client_socket,char *mimeType, int tamanho, time_t ultAtu, int request_check, char *check_type) {
+
+    time_t agora;
+    char bufHora[128];
+    char buffer[100];
+
+    sprintf(buffer, "%s %d %s\r\n", PROTOCOLO, request_check,check_type);
+    write(client_socket, buffer, strlen(buffer));
+
+    sprintf(buffer, "Server: %s\r\n", SERVERNAME);
+    write(client_socket, buffer, strlen(buffer));
+
+    agora = time(NULL);
+    strftime(bufHora, sizeof(bufHora), RFC1123, gmtime(&agora));
+
+    sprintf(buffer, "Date: %s\r\n", bufHora);
+    write(client_socket, buffer, strlen(buffer));
+
+    sprintf(buffer, "Content-Type: %s\r\n", mimeType);
+    write(client_socket, buffer, strlen(buffer));
+
+    if (tamanho >= 0) {
+        sprintf(buffer, "Content-Length: %d\r\n", tamanho);
+        write(client_socket, buffer, strlen(buffer));
     }
 
-    // Size variable for passing to getline
-    size_t size = 1;
+    if (ultAtu != -1){
+        strftime(bufHora, sizeof(bufHora), RFC1123, gmtime(&ultAtu));
+        sprintf(buffer, "Last-Modified: %s\r\n", bufHora);
+        write(client_socket, buffer, strlen(buffer));
+       }
 
-    char *block;
+    write(client_socket, "\r\n", 2);
+}
 
-    // Allocate some memory for block and check it went ok
-    if( (block = malloc(sizeof(char) * size)) == NULL )
-    {
-        fprintf(stderr, "Error allocating memory to block in getMessage\n");
-        exit(EXIT_FAILURE);
-    }
+/**
+ * FunÃ§Ã£o que envia pÃ¡gina de erro para o cliente  - renderizacao html
+ */
+int returnErro(int client_socket, char *mensagem, int request_check) {
+    char buffer[100];
 
-    // Set block to null
-    *block = '\0';
+    sprintf(buffer, "<html>\n<head>\n<title>%s Erro %d</title>\n</head>\n\n", SERVERNAME,request_check);
+    write(client_socket, buffer, strlen(buffer));
 
-    // Allocate some memory for tmp and check it went ok
-    char *tmp;
-    if( (tmp = malloc(sizeof(char) * size)) == NULL )
-    {
-        fprintf(stderr, "Error allocating memory to tmp in getMessage\n");
-        exit(EXIT_FAILURE);
-    }
-    // Set tmp to null
-    *tmp = '\0';
+    sprintf(buffer, "<body>\n<h1>%s Erro %d</h1>\n", SERVERNAME,request_check);
+    write(client_socket, buffer, strlen(buffer));
 
-    // Int to keep track of what getline returns
-    int end;
-    // Int to help use resize block
-    int oldsize = 1;
+    sprintf(buffer, "<p>%s</p>\n</body>\n</html>\n",mensagem);
+    write(client_socket, buffer, strlen(buffer));
 
-    // While getline is still getting data
-    while( (end = getline( &tmp, &size, sstream)) > 0)
-    {
-        // If the line its read is a caridge return and a new line were at the end of the header so break
-        if( strcmp(tmp, "\r\n") == 0)
-        {
-            break;
+    return 0;
+}
+
+/**
+ * FunÃ§Ã£o para mensagens de erro no console
+ */
+void saidaErro(char msg[100]){
+    fprintf(stderr, "%s: %s\r\n", SERVERNAME, msg);
+    exit(EXIT_FAILURE);
+}
+
+
+/******************** Fim de funÃ§Ãµes variadas do Servidor Http *******/
+
+
+/********************* Funcoes de Request do Client ******************/
+/**
+ * FunÃ§Ã£o que verifica a Request solicitada pelo browser
+ */
+CR_returns checkRequest(Host client, Request client_request) {
+
+    CR_returns returns;
+    char pathbuf[MAXBUF]; //Guardar informaÃ§Ãµes sobre o caminho do recurso
+    int len; //Para auxliar na contagem de tamanho do "caminho"
+
+    strcpy(returns.dir,DIR_ROOT); // Copiar para a variÃ¡vel dir o caminho do DIR_ROOT
+
+    //Se existir o recurso, concatena com a variavel dir, se nao complementa com a pagina inicial /index.html
+    if(client_request.recurso)
+        strcat(returns.dir,client_request.recurso);
+    else strcat(returns.dir,"/index.html");
+
+    printf("\n [PAGE DIR] %s\n", returns.dir);
+    printf("\n ______________________________________________________________________________\n\n");
+
+    // Se o tipo de mÃ©todo nao existir returns com check == 501
+    if(strcmp(client_request.metodo, "GET") != 0)
+        {returns.answerCOD = 501; return returns;}
+
+    // Se o arquivo nao existe returns com check == 404
+    if(stat(returns.dir, &returns.statBuffer) == -1)
+        {returns.answerCOD = 404; return returns;}
+
+    // Se o arquivo for encontrado e for um diretorio
+    if(S_ISDIR(returns.statBuffer.st_mode)) { //Inicio if 1
+        len = strlen(returns.dir);
+
+        // Se nÃ£o colocar a barra no final da url, no caso de ser um diretÃ³rio
+        if (len == 0 || returns.dir[len - 1] != '/'){ //Inicio if 2
+
+            // Adicionar a "/index.html" barra no final da URL(pelo menos dentro do servidor)
+            snprintf(pathbuf, sizeof(pathbuf), "%s/", returns.dir);
+            strcat(returns.dir,"/index.html");
+
+            // Se existir o index.html dentro do diretorio, entÃ£o returns com check == 200, se nao existir check == 404
+            if(stat(returns.dir, &returns.statBuffer) == -1)
+                {returns.answerCOD = 404; return returns;}
+            else
+                {returns.answerCOD = 200; return returns;}
         }
+        else{
+            // Se nÃ£o tiver colocar "/" depois do nome do diretÃ³rio entÃ£o colocarÃ¡ apenas index.html
+            snprintf(pathbuf, sizeof(pathbuf), "%sindex.html", returns.dir);
+            strcat(returns.dir,"index.html");
 
-        // Resize block
-        block = realloc(block, size+oldsize);
-        // Set the value of oldsize to the current size of block
-        oldsize += size;
-        // Append the latest line we got to block
-        strcat(block, tmp);
+            // Se existir o index.html dentro do diretorio, entÃ£o returns com answerCOD == 200, se nao existir answerCOD == 404
+            if(stat(returns.dir, &returns.statBuffer) >= 0)
+                {returns.answerCOD = 200; return returns;}
+            else
+                {returns.answerCOD = 404; return returns;}
+        } //Fim if 2
     }
-
-    // Free tmp a we no longer need it
-    free(tmp);
-
-    // Return the header
-    return block;
-
-}
-
-// send a message to a socket file descripter
-int sendMessage(int fd, char *msg) {
-    return write(fd, msg, strlen(msg));
-}
-
-// Extracts the filename needed from a GET request and adds public_html to the front of it
-char * getFileName(char* msg)
-{
-    // Variable to store the filename in
-    char * file;
-    // Allocate some memory for the filename and check it went OK
-    if( (file = malloc(sizeof(char) * strlen(msg))) == NULL)
-    {
-        fprintf(stderr, "Error allocating memory to file in getFileName()\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // Get the filename from the header
-    sscanf(msg, "GET %s HTTP/1.1", file);
-
-    // Allocate some memory not in read only space to store "public_html"
-    char *base;
-    if( (base = malloc(sizeof(char) * (strlen(file) + 18))) == NULL)
-    {
-        fprintf(stderr, "Error allocating memory to base in getFileName()\n");
-        exit(EXIT_FAILURE);
-    }
-
-    char* ph = "public_html";
-
-    // Copy public_html to the non read only memory
-    strcpy(base, ph);
-
-    // Append the filename after public_html
-    strcat(base, file);
-
-    // Free file as we now have the file name in base
-    free(file);
-
-    // Return public_html/filetheywant.html
-    return base;
-}
-
-// parse a HTTP request and return an object with return code and filename
-httpRequest parseRequest(char *msg){
-    httpRequest ret;
-
-    // A variable to store the name of the file they want
-    char* filename;
-    // Allocate some memory to filename and check it goes OK
-    if( (filename = malloc(sizeof(char) * strlen(msg))) == NULL)
-    {
-        fprintf(stderr, "Error allocating memory to filename in parseRequest()\n");
-        exit(EXIT_FAILURE);
-    }
-    // Find out what page they want
-    filename = getFileName(msg);
-
-    // Check if its a directory traversal attack
-    char *badstring = "..";
-    char *test = strstr(filename, badstring);
-
-    // Check if they asked for / and give them index.html
-    int test2 = strcmp(filename, "public_html/");
-
-    // Check if the page they want exists
-    FILE *exists = fopen(filename, "r" );
-
-    // If the badstring is found in the filename
-    if( test != NULL )
-    {
-        // Return a 400 header and 400.html
-        ret.returncode = 400;
-        ret.filename = "400.html";
-    }
-
-    // If they asked for / return index.html
-    else if(test2 == 0)
-    {
-        ret.returncode = 200;
-        ret.filename = "public_html/index.html";
-    }
-
-    // If they asked for a specific page and it exists because we opened it sucessfully return it
-    else if( exists != NULL )
-    {
-
-        ret.returncode = 200;
-        ret.filename = filename;
-        // Close the file stream
-        fclose(exists);
-    }
-
-    // If we get here the file they want doesn't exist so return a 404
+    // Se for um arquivo que nao seja um diretorio returns com answerCOD == 200, com o endereÃ§o da url completo (statBuffer)
     else
-    {
-        ret.returncode = 404;
-        ret.filename = "404.html";
-    }
-
-    // Return the structure containing the details
-    return ret;
+        {returns.answerCOD = 200; return returns;} //Fim if 1
 }
 
-// print a file out to a socket file descriptor
-int printFile(int fd, char *filename) {
+/**
+ *FunÃ§Ã£o que ler/organiza a requisiÃ§Ã£o do browser
+ */
+Request readRequest(Host client, FILE *f) {
 
-    /* Open the file filename and echo the contents from it to the file descriptor fd */
+    Request client_request;
+    char line[MAXBUF];
+    char *metodo = malloc(4);
+    char *recurso = malloc(1000);
+    char *protocolo = malloc(20);
 
-    // Attempt to open the file
-    FILE *read;
-    if( (read = fopen(filename, "r")) == NULL)
-    {
-        fprintf(stderr, "Error opening file in printFile()\n");
-        exit(EXIT_FAILURE);
-    }
+    // Colocar os dados do socket(file) na variÃ¡vel "line"
+    fgets(line,MAXBUF,f);
+    strcpy(client_request.line, line);
 
-    // Get the size of this file for printing out later on
-    int totalsize;
-    struct stat st;
-    stat(filename, &st);
-    totalsize = st.st_size;
+    // destrinchando a variavel line. http://www.br-c.org/doku.php?id=strtok
+    metodo = strtok(line, " ");
+    recurso = strtok(NULL, " ");
+    protocolo = strtok(NULL, "\r");
 
-    // Variable for getline to write the size of the line its currently printing to
-    size_t size = 1;
+    strcpy(client_request.metodo, metodo);
+    strcpy(client_request.recurso,recurso);
+    strcpy(client_request.protocolo, protocolo);
 
-    // Get some space to store each line of the file in temporarily
-    char *temp;
-    if(  (temp = malloc(sizeof(char) * size)) == NULL )
-    {
-        fprintf(stderr, "Error allocating memory to temp in printFile()\n");
-        exit(EXIT_FAILURE);
-    }
-
-
-    // Int to keep track of what getline returns
-    int end;
-
-    // While getline is still getting data
-    while( (end = getline( &temp, &size, read)) > 0)
-    {
-        sendMessage(fd, temp);
-    }
-
-    // Final new line
-    sendMessage(fd, "\n");
-
-    // Free temp as we no longer need it
-    free(temp);
-
-    // Return how big the file we sent out was
-    return totalsize;
-
+    return client_request;
 }
 
-// clean up listening socket on ctrl-c
-void cleanup(int sig) {
+/**
+ * FunÃ§Ã£o para enviar o arquivo
+ */
+void sendFile(int client_socket, CR_returns returns){
+    char dados;
+    int i;
 
-    printf("Cleaning up connections and exiting.\n");
+    FILE *arq = fopen(returns.dir, "r");
 
-    // try to close the listening socket
-    if (close(list_s) < 0) {
-        fprintf(stderr, "Error calling close()\n");
-        exit(EXIT_FAILURE);
+    // Ver se o sistema tem acesso ao arquivo
+    if (!arq) {
+        returns.answerCOD = 403;
+        httpHeader(client_socket,"text/html",-1,-1, returns.answerCOD, "Forbidden");
+        returnErro(client_socket,"Acesso Negado", returns.answerCOD);
     }
+    else {
+        int tamanho = S_ISREG(returns.statBuffer.st_mode) ? returns.statBuffer.st_size : -1;
 
-    // Close the shared memory we used
-    shm_unlink("/sharedmem");
+        httpHeader(client_socket,get_mime_type(returns.dir),tamanho ,returns.statBuffer.st_mtime, returns.answerCOD, "OK");
 
-    // exit with success
-    exit(EXIT_SUCCESS);
-}
+        //Enviando
+        while ((i = read(returns.n, &dados,1)))
+            write(client_socket, &dados, 1);
 
-int printHeader(int fd, int returncode)
-{
-    // Print the header based on the return code
-    switch (returncode)
-    {
-        case 200:
-        sendMessage(fd, header200);
-        return strlen(header200);
-        break;
-
-        case 400:
-        sendMessage(fd, header400);
-        return strlen(header400);
-        break;
-
-        case 404:
-        sendMessage(fd, header404);
-        return strlen(header404);
-        break;
     }
 }
 
+/**
+ * FunÃ§Ã£o que envia resposta a requisiÃ§Ã£o do browser
+ */
+void sendRequest(Host client, CR_returns returns){
+    if (returns.answerCOD == 501) // MÃ©todo nÃ£o suportado pelo servidor
+            returnErro(client.socket,"Metodo nao suportado", returns.answerCOD);
 
-// Increment the global count of data sent out
-int recordTotalBytes(int bytes_sent, sharedVariables *mempointer)
-{
-    // Lock the mutex
-    pthread_mutex_lock(&(*mempointer).mutexlock);
-    // Increment bytes_sent
-    (*mempointer).totalbytes += bytes_sent;
-    // Unlock the mutex
-    pthread_mutex_unlock(&(*mempointer).mutexlock);
-    // Return the new byte count
-    return (*mempointer).totalbytes;
+    if (returns.answerCOD == 404) // Arquivo nÃ£o encontrado
+            returnErro(client.socket,"Pagina nao encontrada", returns.answerCOD);
+
+    if (returns.answerCOD == 200){
+            returns.n = open(returns.dir, O_RDONLY);
+            sendFile(client.socket,returns);
+    }
 }
 
+/****************** Fim das funcoes de Request *************/
 
-int main(int argc, char *argv[]) {
-    int conn_s;                  //  connection socket
-    short int port = PORT;       //  port number
-    struct sockaddr_in servaddr; //  socket address structure
+/****************** Funcoes para o Thread *****************/
+/**
+ * Funcao Secundaria do thread
+ */
+void function(Host server, Host client){
+    printf(" [CONNECTION ACCEPTED] \n\n");
+    printf (" Cliente [%s] conectado na porta [%d] do servidor \n\n", inet_ntoa(client.destino.sin_addr), ntohs(client.destino.sin_port));
 
-    // set up signal handler for ctrl-c
-    (void) signal(SIGINT, cleanup);
+    /* Jogar os dados do socket(int) em um arquivo para pegar a requisiÃ§Ã£o(line)*/
+    FILE *f = fdopen(client.socket,"r+");
 
-    // create the listening socket
-    if ((list_s = socket(AF_INET, SOCK_STREAM, 0)) < 0 ) {
-        fprintf(stderr, "Error creating listening socket.\n");
-        exit(EXIT_FAILURE);
-    }
+    /* Ler a Request do client*/
+    Request client_request = readRequest(client, f);
 
-    // set all bytes in socket address structure to zero, and fill in the relevant data members
-    memset(&servaddr, 0, sizeof(servaddr));
-    servaddr.sin_family      = AF_INET;
-    servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    servaddr.sin_port        = htons(port);
+    printf("\n [Client_Request.metodo]    %s \n", client_request.metodo);
+        printf("\n [Client_request.recurso]   %s \n", client_request.recurso);
+        printf("\n [Client_request.protocolo] %s \n", client_request.protocolo);
 
-    // bind to the socket address
-    if (bind(list_s, (struct sockaddr *) &servaddr, sizeof(servaddr)) < 0 ) {
-        fprintf(stderr, "Error calling bind()\n");
-        exit(EXIT_FAILURE);
-    }
+    /* checkar a Request do client */
+    CR_returns returns =  checkRequest(client, client_request);
 
+    /* enviar resposta da Request ao client */
+    sendRequest(client, returns);
 
-    // Listen on socket list_s
-    if( (listen(list_s, 10)) == -1)
-    {
-        fprintf(stderr, "Error Listening\n");
-        exit(EXIT_FAILURE);
-    }
+    // Fechar arquivo
+    fclose(f);
 
-    // Set up some shared memory to store our shared variables in
+    // Fechar socket
+    close(client.socket);
+}
 
-    // Close the shared memory we use just to be safe
-    shm_unlink("/sharedmem");
+/**
+ * Funcao Primaria do thread
+ * http://pt.wikipedia.org/wiki/Thread_(ci%C3%AAncia_da_computa%C3%A7%C3%A3o)
+ * https://computing.llnl.gov/tutorials/pthreads/
+ */
+void *thread_function (void *hostage){
+    Host server, client;
+    Hosts *hosts_aux;
 
-    int sharedmem;
+    hosts_aux = (Hosts *)hostage;
 
-    // Open the memory
-    if( (sharedmem = shm_open("/sharedmem", O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR)) == -1)
-    {
-        fprintf(stderr, "Error opening sharedmem in main() errno is: %s ", strerror(errno));
-        exit(EXIT_FAILURE);
-    }
+    server = hosts_aux->server;
+    client = hosts_aux->client;
 
-    // Set the size of the shared memory to the size of my structure
-    ftruncate(sharedmem, sizeof(sharedVariables) );
+    function(server, client);
 
-    // Map the shared memory into our address space
-    sharedVariables *mempointer;
+    pthread_exit(NULL);
+}
 
-    // Set mempointer to point at the shared memory
-    mempointer = mmap(NULL, sizeof(sharedVariables), PROT_READ | PROT_WRITE, MAP_SHARED, sharedmem, 0);
+/**
+ * Funcao pra Ligar o thread
+ */
+void turnThread_on(Host server, Host client, pthread_t thread ){
+    Hosts hosts_;
 
-    // Check the memory allocation went OK
-    if( mempointer == MAP_FAILED )
-    {
-        fprintf(stderr, "Error setting shared memory for sharedVariables in recordTotalBytes() error is %d \n ", errno);
-        exit(EXIT_FAILURE);
-    }
-    // Initalise the mutex
-    pthread_mutex_init(&(*mempointer).mutexlock, NULL);
-    // Set total bytes sent to 0
-    (*mempointer).totalbytes = 0;
+    hosts_.server = server;
+    hosts_.client = client;
 
-    // Size of the address
-    int addr_size = sizeof(servaddr);
+    pthread_create(&thread, NULL, thread_function, (void *) &hosts_);
+}
 
-    // Sizes of data were sending out
-    int headersize;
-    int pagesize;
-    int totaldata;
-    // Number of child processes we have spawned
-    int children = 0;
-    // Variable to store the ID of the process we get when we spawn
-    pid_t pid;
+/*********************** Funcao principal ******************/
+int main() {
 
-    // Loop infinitly serving requests
-    while(1)
-    {
+    // Limpar a tela
+    system("clear");
 
-        // If we haven't already spawned 10 children fork
-        if( children <= 10)
-        {
-            pid = fork();
-            children++;
+    printf("\n Inicializando servidor %s...",SERVERNAME);
+
+    Host server;
+    if (setServer(&server, PORTA) > 0)
+            saidaErro(" Nao foi possivel criar o socket do servidor.");
+
+    printf("\n [Inicializado com sucesso]\n\n");
+    printf("\n ***********************************************************");
+    printf("\n Eu sou o servidor http em C. Estou escutando a porta [%d]", PORTA);
+    printf("\n ***********************************************************\n\n");
+
+    Host client[MAX_THREAD];
+
+    //Iniciando o vetor de clientes com o valor 0
+    int i;
+    for (i=0; i<MAX_THREAD;i++)
+        client[i].socket = 0;
+
+    int threadCOD = 0;
+    pthread_t thread[MAX_THREAD];
+
+    while(1) {
+        //Se o socket do client[threadCOD] estiver com o valor de inicio 0 (o que significa que nao esta sendo usado)
+        if (client[threadCOD].socket == 0){
+            //Se a funcao de sokcet accept for false entao retorna erro
+            if (initAccept(&server,&client[threadCOD]) == false)
+                saidaErro("Nao foi possivel efetuar acao de accept().\n");
+
+            printf("\n[THREAD_COD] %d \n", threadCOD);
+            turnThread_on(server, client[threadCOD], thread[threadCOD]);
         }
 
-        // If the pid is -1 the fork failed so handle that
-        if( pid == -1)
-        {
-            fprintf(stderr,"can't fork, error %d\n" , errno);
-            exit (1);
+        //Implementando um vetor circular, se client sock nao estiver zerado (valor == 0))
+        if (client[threadCOD].socket != 0){
+            if (threadCOD > MAX_THREAD )  //Se o indice de vetor threadCOD for maior que a capacidade maxima de threads MAX_THREAD
+                threadCOD = 0; // reinicia o indice threadCOD do vetor client com 0
+            else threadCOD++; //se nao incrementa o indice do vetor client "threadCOD" +1
         }
 
-        // Have the child process deal with the connection
-        if ( pid == 0)
-        {
-            // Have the child loop infinetly dealing with a connection then getting the next one in the queue
-            while(1)
-            {
-                // Accept a connection
-                conn_s = accept(list_s, (struct sockaddr *)&servaddr, &addr_size);
-
-                // If something went wrong with accepting the connection deal with it
-                if(conn_s == -1)
-                {
-                    fprintf(stderr,"Error accepting connection \n");
-                    exit (1);
-                }
-
-                // Get the message from the file descriptor
-                char * header = getMessage(conn_s);
-
-                // Parse the request
-                httpRequest details = parseRequest(header);
-
-                // Free header now were done with it
-                free(header);
-
-                // Print out the correct header
-                headersize = printHeader(conn_s, details.returncode);
-
-                // Print out the file they wanted
-                pagesize = printFile(conn_s, details.filename);
-
-                // Increment our count of total datasent by all processes and get back the new total
-                totaldata = recordTotalBytes(headersize+pagesize, mempointer);
-
-                // Print out which process handled the request and how much data was sent
-                printf("Process %d served a request of %d bytes. Total bytes sent %d  \n", getpid(), headersize+pagesize, totaldata);
-
-                // Close the connection now were done
-                close(conn_s);
-            }
-        }
-    }
-
-    return EXIT_SUCCESS;
+    }//fim do loop
 }
