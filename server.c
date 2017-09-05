@@ -17,10 +17,6 @@
 #define YELLOW	"\x1B[33m"
 #define RESET	"\x1B[0m"
 
-#define OK 200
-#define FORBIDDEN 403
-#define NOT_FOUND 404
-
 #define PROTOCOL "HTTP/1.0"
 #define SERVER "Webserver in C"
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
@@ -55,38 +51,39 @@ void header(int handler, int status, const char * title, const char * mimeType, 
         strcat(header, aux);
     }
     strcat(header, "Connection: close\r\n\r\n");
-    fprintf(stderr, CYAN "\n\n%s\n\n" RESET, header);
     send(handler, header, strlen(header), 0);
+}
+
+void sendFile(int handler, FILE * file) {
+    char buffer[MAXBUF];
+    while (fgets(buffer, MAXBUF, file)) {
+        send(handler, buffer, strlen(buffer), 0);
+        memset(buffer, 0, MAXBUF);
+    }
 }
 
 void sendNotImplemented(int handler) {
     header(handler, 501, "Not Implemented", "text/html", -1);
     FILE * file = fopen("./pages/501.html", "r");
-    char buffer[MAXBUF];
-    while (fgets(buffer, MAXBUF, file)) {
-        send(handler, buffer, strlen(buffer), 0);
-        memset(buffer, 0, MAXBUF);
-    }
+    sendFile(handler, file);
 }
 
 void sendNotFound(int handler) {
     header(handler, 404, "Not Found", "text/html", -1);
     FILE * file = fopen("./pages/404.html", "r");
-    char buffer[MAXBUF];
-    while (fgets(buffer, MAXBUF, file)) {
-        send(handler, buffer, strlen(buffer), 0);
-        memset(buffer, 0, MAXBUF);
-    }
+    sendFile(handler, file);
+}
+
+void sendForbidden(int handler) {
+    header(handler, 403, "Forbidden", "text/html", -1);
+    FILE * file = fopen("./pages/403.html", "r");
+    sendFile(handler, file);
 }
 
 void sendPage(int handler, const char * path) {
     header(handler, 200, "OK", "text/html", -1);
     FILE * file = fopen(path, "r");
-    char buffer[MAXBUF];
-    while (fgets(buffer, MAXBUF, file)) {
-        send(handler, buffer, strlen(buffer), 0);
-        memset(buffer, 0, MAXBUF);
-    }
+    sendFile(handler, file);
 }
 
 void resolve(int handler) {
@@ -94,13 +91,15 @@ void resolve(int handler) {
     char * method;
     char * path;
     char * protocol;
-    struct stat statbuf;
 
     // The recv(), recvfrom(), and recvmsg() calls are used to receive messages from a socket
     // The recv() call is normally used only on a connected socket
     recv(handler, buffer, MAXBUF, 0);
     fprintf(stderr, "%s\n", buffer);
 
+    //  To signal strtok() that you want to keep searching the same string, you pass a NULL pointer as its first argument.
+    // strtok() checks whether it is NULL and if it is so, it uses its currently stored data.
+    // If the first parameter is not null, it is treated as a new search and all internal data is resetted.
     method = strtok(buffer, " ");
     path = strtok(NULL, " ");
     protocol = strtok(NULL, "\r");
@@ -116,58 +115,17 @@ void resolve(int handler) {
     if (path[0] == '/') path++;
     if (path[0] == '\0') {
         sendPage(handler, "./pages/index.html");
-        return;
-    } else if (stat(path, &statbuf) < 0) {
+    } else if (access(path, F_OK) != 0) {
+        // access - determine accessibility of a file
+        // Not Found
         sendNotFound(handler);
-        fprintf(stderr, "\n\nnot found\n\n");
-        return;
+    } else if (access(path, R_OK) != 0) {
+        // Forbidden
+        sendForbidden(handler);
+    } else {
+        // OK
+        sendPage(handler, path);
     }
-
-/*
-
-
-    if (strcmp(method, "GET") != 0) return;
-
-    //  To signal strtok() that you want to keep searching the same string, you pass a NULL pointer as its first argument.
-    // strtok() checks whether it is NULL and if it is so, it uses its currently stored data.
-    // If the first parameter is not null, it is treated as a new search and all internal data is resetted.
-    filename = strtok(NULL, " ");
-    if (filename[0] == '/') filename++;
-
-    if(filename[0] == '\0') {
-        header(handler, OK);
-        FILE * file = fopen("pages/index.html", "r");
-        while (fgets(buffer, MAXBUF, file)) {
-            send(handler, buffer, strlen(buffer), 0);
-            memset(buffer, 0, MAXBUF);
-        }
-        return;
-    }
-
-    // access - determine accessibility of a file
-    if (access(filename, F_OK) != 0) {
-        header(handler, NOT_FOUND);
-        FILE * file = fopen("pages/404.html", "r");
-        while (fgets(buffer, MAXBUF, file)) {
-            send(handler, buffer, strlen(buffer), 0);
-            memset(buffer, 0, MAXBUF);
-        }
-        return;
-    } else if (access(filename, R_OK) != 0) {
-        header(handler, FORBIDDEN);
-        FILE * file = fopen("pages/403.html", "r");
-        while (fgets(buffer, MAXBUF, file)) {
-            send(handler, buffer, strlen(buffer), 0);
-            memset(buffer, 0, MAXBUF);
-        }
-        return;
-    }
-    header(handler, OK);
-    FILE * file = fopen(filename, "r");
-    while (fgets(buffer, MAXBUF, file)) {
-        send(handler, buffer, strlen(buffer), 0);
-        memset(buffer, 0, MAXBUF);
-    }*/
 }
 
 int main(int argc, char **argv) {
@@ -197,7 +155,7 @@ int main(int argc, char **argv) {
         perror("listen");
         exit(EXIT_FAILURE);
     }
-    printf("\n\nHTTP server listening on port %d\n\n", PORT);
+    printf("\nHTTP server listening on port %d\n\n", PORT);
 
 	// Loop infinitly serving requests
 	while(1) {
