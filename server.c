@@ -3,11 +3,12 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+
+#include <fcntl.h>      /* Biblioteca para se utilizar a função open() */
 
 #include <netdb.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <netinet/in.h>
 
 #define PORT 3000
@@ -20,6 +21,42 @@
 #define PROTOCOL "HTTP/1.0"
 #define SERVER "Webserver in C"
 #define RFC1123FMT "%a, %d %b %Y %H:%M:%S GMT"
+
+#define CONNECTION_QUEUE       (1024)                /* Tamanho maximo da fila de conexoes pendentes */
+
+/**
+ * Estrutura utilizada para armazenar dados de um Host
+ */
+typedef struct {
+    int socket;
+    struct sockaddr_in address;
+} Host;
+
+/**
+ * Estrutura utilizada para representar uma requisição de um cliente
+ */
+typedef struct {
+    char buffer[MAXBUF];
+    char * method;
+    char * path;
+    char * protocol;
+} Request;
+
+const char * get_mime_type(const char * name) {
+    const char * ext = strrchr(name, '.');
+    if (!ext) return NULL;
+    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm") == 0) return "text/html";
+    if (strcmp(ext, ".jpg") == 0 || strcmp(ext, ".jpeg") == 0) return "image/jpeg";
+    if (strcmp(ext, ".gif") == 0) return "image/gif";
+    if (strcmp(ext, ".png") == 0) return "image/png";
+    if (strcmp(ext, ".css") == 0) return "text/css";
+    if (strcmp(ext, ".au") == 0) return "audio/basic";
+    if (strcmp(ext, ".wav") == 0) return "audio/wav";
+    if (strcmp(ext, ".avi") == 0) return "video/x-msvideo";
+    if (strcmp(ext, ".mpeg") == 0 || strcmp(ext, ".mpg") == 0) return "video/mpeg";
+    if (strcmp(ext, ".mp3") == 0) return "audio/mpeg";
+    return NULL;
+}
 
 void header(int handler, int status, const char * title, const char * mimeType, int length) {
     char header[MAXBUF] = {0};
@@ -51,132 +88,182 @@ void header(int handler, int status, const char * title, const char * mimeType, 
         strcat(header, aux);
     }
     strcat(header, "Connection: close\r\n\r\n");
+    fprintf(stderr, "%s\n", header);
     send(handler, header, strlen(header), 0);
 }
 
-void sendFile(int handler, FILE * file) {
+void sendPage(int handler, FILE * file) {
     char buffer[MAXBUF];
     while (fgets(buffer, MAXBUF, file)) {
         send(handler, buffer, strlen(buffer), 0);
         memset(buffer, 0, MAXBUF);
     }
+    fclose(file);
 }
 
 void sendNotImplemented(int handler) {
     header(handler, 501, "Not Implemented", "text/html", -1);
-    FILE * file = fopen("./pages/501.html", "r");
-    sendFile(handler, file);
+    FILE * file = fopen("501.html", "r");
+    sendPage(handler, file);
 }
 
 void sendNotFound(int handler) {
     header(handler, 404, "Not Found", "text/html", -1);
-    FILE * file = fopen("./pages/404.html", "r");
-    sendFile(handler, file);
+    FILE * file = fopen("404.html", "r");
+    sendPage(handler, file);
 }
 
 void sendForbidden(int handler) {
     header(handler, 403, "Forbidden", "text/html", -1);
-    FILE * file = fopen("./pages/403.html", "r");
-    sendFile(handler, file);
+    FILE * file = fopen("403.html", "r");
+    sendPage(handler, file);
 }
 
-void sendPage(int handler, const char * path) {
-    header(handler, 200, "OK", "text/html", -1);
+void sendData(int handler, const char * path, struct stat statbuf) {
+
+    int n = open(path, O_RDONLY);
+    char dados;
+    int i;
+
     FILE * file = fopen(path, "r");
-    sendFile(handler, file);
+
+    int tamanho = S_ISREG(statbuf.st_mode) ? statbuf.st_size : -1;
+    header(handler, 200, "OK", get_mime_type(path), tamanho);
+    // Enviando
+    while ((i = read(n, &dados, 1)))
+        write(handler, &dados, 1);
+    //fclose(file);
 }
 
-void resolve(int handler) {
-    char buffer[MAXBUF];
-    char * method;
-    char * path;
-    char * protocol;
-
+Request readRequest(int handler) {
+    Request request;
+    // Colocar os dados do socket na variÃ¡vel request.buffer
     // The recv(), recvfrom(), and recvmsg() calls are used to receive messages from a socket
     // The recv() call is normally used only on a connected socket
-    recv(handler, buffer, MAXBUF, 0);
-    fprintf(stderr, "%s\n", buffer);
-
+    recv(handler, request.buffer, MAXBUF, 0);
     //  To signal strtok() that you want to keep searching the same string, you pass a NULL pointer as its first argument.
     // strtok() checks whether it is NULL and if it is so, it uses its currently stored data.
     // If the first parameter is not null, it is treated as a new search and all internal data is resetted.
-    method = strtok(buffer, " ");
-    path = strtok(NULL, " ");
-    protocol = strtok(NULL, "\r");
+    request.method = strtok(request.buffer, " ");
+    request.path = strtok(NULL, " ");
+    request.protocol = strtok(NULL, "\r");
+    return request;
+}
 
-    if (!method || !path || !protocol) return;
+void resolve(int handler) {
+    struct stat statbuf;
+
+    Request clientRequest = readRequest(handler);
+    if (!clientRequest.method || !clientRequest.path || !clientRequest.protocol) return;
 
     // Only accept GET requests
-    if (strcasecmp(method, "GET") != 0) {
+    if (strcasecmp(clientRequest.method, "GET") != 0) {
         sendNotImplemented(handler);
         return;
+    } else if (stat(++clientRequest.path, &statbuf) < 0) {
+        // Not Found
+        fprintf(stderr, "%s\n", "erro");
+        sendNotFound(handler);
     }
 
-    if (path[0] == '/') path++;
-    if (path[0] == '\0') {
-        sendPage(handler, "./pages/index.html");
+    //if (path[0] == '/') path++;
+    /*if (path[0] == '\0') {
+        sendData(handler, "index.html");
     } else if (access(path, F_OK) != 0) {
         // access - determine accessibility of a file
-        // Not Found
-        sendNotFound(handler);
+
     } else if (access(path, R_OK) != 0) {
         // Forbidden
         sendForbidden(handler);
-    } else {
+    } else {*/
         // OK
-        sendPage(handler, path);
-    }
+        sendData(handler, clientRequest.path, statbuf);
+    //}
 }
 
-int main(int argc, char **argv) {
-    int server;
-    struct sockaddr_in address;
+/**
+ * Accept a new connection on a socket
+ */
+int acceptConnection(Host server) {
+    int handler;
+    struct sockaddr_storage client;
+    socklen_t size = sizeof(client);
+    handler = accept(server.socket, (struct sockaddr *) &client, &size);
+    return handler;
+}
 
-    /*---Create streaming socket---*/
-    if ((server = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("socket failed");
-        exit(EXIT_FAILURE);
-    }
-
-	/*---Initialize address/port structure---*/
-	bzero(&address, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_port = htons(PORT);
-
-    /*---Assign a port number to the socket---*/
-    if (bind(server, (struct sockaddr *) &address, sizeof(address)) < 0) {
-        perror("bind failed");
-        exit(EXIT_FAILURE);
-    }
-
-	/*---Make it a "listening socket"---*/
-    if (listen(server, 3) < 0) {
+/**
+ * Listen for socket connections and limit the queue of incoming connections
+ */
+void listenSocket(int host) {
+    if (listen(host, CONNECTION_QUEUE) < 0) {
         perror("listen");
         exit(EXIT_FAILURE);
     }
-    printf("\nHTTP server listening on port %d\n\n", PORT);
+}
+
+/**
+ * Bind a name to a socket
+ */
+void bindSocket(Host * host) {
+    Host aux = *host;
+    if (bind(aux.socket, (struct sockaddr *) &aux.address, sizeof(aux.address)) < 0) {
+        perror("bind failed");
+        exit(EXIT_FAILURE);
+    }
+    *host = aux;
+}
+
+/**
+ * Create an endpoint for communication
+ */
+void createSocket(int * domain) {
+    if ((*domain = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+}
+
+Host createHost(int port) {
+    Host host;
+
+    /*---Create streaming socket---*/
+    createSocket(&host.socket);
+
+	/*---Initialize address/port structure---*/
+	memset(&host.address, 0, sizeof(host.address));
+    host.address.sin_family = AF_INET;
+    host.address.sin_addr.s_addr = htonl(INADDR_ANY);
+    host.address.sin_port = htons(port);
+
+    /*---Assign a port number to the socket---*/
+    bindSocket(&host);
+
+    /*---Make it a "listening socket"---*/
+    listenSocket(host.socket);
+    return host;
+}
+
+int main(int argc, char **argv) {
+    Host server = createHost(PORT);
+
+    // Limpar a tela
+    system("clear");
+    printf(CYAN "\nHTTP server listening on port %d\n\n" RESET, PORT);
 
 	// Loop infinitly serving requests
 	while(1) {
-        int handler;
-        socklen_t size;
-        struct sockaddr_storage client;
-
-        size = sizeof(client);
-
-        handler = accept(server, (struct sockaddr *) &client, &size);
+        int handler = acceptConnection(server);
         if(handler < 0) {
             perror("accept");
             continue;
         }
-
         resolve(handler);
 		/*---Close data connection---*/
 		close(handler);
 	}
 	/*---Clean up (should never get here!)---*/
-	close(server);
+	close(server.socket);
 	printf(YELLOW "\nServer down...\n\n" RESET);
     return EXIT_SUCCESS;
 }
