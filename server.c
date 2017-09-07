@@ -141,16 +141,15 @@ void sendData(int handler, const char * path, struct stat statbuf) {
 
 Request readRequest(int handler) {
     Request request;
-    // Colocar os dados do socket na variÃ¡vel request.buffer
-    // The recv(), recvfrom(), and recvmsg() calls are used to receive messages from a socket
-    // The recv() call is normally used only on a connected socket
-    //recv(handler, request.buffer, MAXBUF, 0);
-    printf("\n\nREADING REQUEST\n");
+
+    // Coloca os dados do socket na variável request.buffer
     read(handler, request.buffer, sizeof(request.buffer));
-    //  To signal strtok() that you want to keep searching the same string, you pass a NULL pointer as its first argument.
-    // strtok() checks whether it is NULL and if it is so, it uses its currently stored data.
-    // If the first parameter is not null, it is treated as a new search and all internal data is resetted.
-    printf("%s\n", request.buffer);
+
+    /**
+     * To signal strtok() that you want to keep searching the same string, you pass a NULL pointer as its first argument.
+     * strtok() checks whether it is NULL and if it is so, it uses its currently stored data.
+     * If the first parameter is not null, it is treated as a new search and all internal data is resetted.
+     */
     request.method = strtok(request.buffer, " ");
     request.path = strtok(NULL, " ");
     request.protocol = strtok(NULL, "\r");
@@ -201,9 +200,6 @@ int acceptConnection(Host * server, Host * client) {
 
     printf("\n[CONEXÃO ACEITA]");
     printf ("\n- Cliente [%s] conectado na porta [%d] do servidor\n", inet_ntoa(client->address.sin_addr), ntohs(client->address.sin_port));
-
-    printf("sock 1 %d\n", server->socket);
-    printf("sock 2 %d\n", client->socket);
     return SUCCESS;
 }
 
@@ -282,11 +278,8 @@ void * runThread(void * hostage) {
 
     server = hosts_aux->server;
     client = hosts_aux->client;
-
-    printf("sock 11 %d\n", server.socket);
-    printf("sock 22 %d\n", client.socket);
-
     resolve(server, client);
+
     /* Fecha a conexão com o cliente */
     close(client.socket);
     pthread_exit(NULL);
@@ -320,16 +313,18 @@ int main(int argc, char **argv) {
                 perror("accept");
                 continue;
             }
-            printf("\n[Contador de Threads: %d]\n", threadCounter);
+            printf("[Contador de Threads: %d]\n\n", threadCounter);
             // Cria a Thread para o cliente
             createThread(server, clients[threadCounter], thread[threadCounter]);
         }
 
         // Implementando um vetor circular, se client sock nao estiver zerado (valor == 0))
         if (clients[threadCounter].socket != 0) {
-            if (threadCounter > MAX_THREAD )        // Se o indice de vetor threadCounter for maior que a capacidade maxima de threads MAX_THREAD
+            if (threadCounter >= MAX_THREAD - 1) {  // Se o indice de vetor threadCounter for maior que a capacidade maxima de threads MAX_THREAD
+                for (i = 0; i < MAX_THREAD; i++)
+                    clients[i].socket = 0;
                 threadCounter = 0;                  // Reinicia o indice threadCOD do vetor clients com 0
-            else threadCounter++;                   // Senão, incrementa o indice do vetor clients
+            } else threadCounter++;                 // Senão, incrementa o indice do vetor clients
         }
 	}
 	// Fecha o socket servidor (deve nunca chegar aqui)
